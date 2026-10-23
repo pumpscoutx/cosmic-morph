@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Cosmic Morph — 3D Particle Metamorphosis</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background-color: #030308;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #canvas-container {
+      width: 100%; height: 100%;
+      position: absolute; top: 0; left: 0;
+      z-index: 1;
+    }
+    #ui-overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      z-index: 2; pointer-events: none;
+      display: flex; flex-direction: column;
+      justify-content: space-between; align-items: center;
+      padding: 30px 20px;
+    }
+    .header {
+      text-align: center;
+      opacity: 0.85;
+      text-transform: uppercase;
+      letter-spacing: 0.35em;
+      font-size: 11px;
+      color: #9ab4d0;
+      text-shadow: 0 0 12px rgba(154, 180, 208, 0.4);
+    }
+    .bottom-hud {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    #shape-name {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.4em;
+      text-transform: uppercase;
+      color: #ffffff;
+      text-shadow: 0 0 20px rgba(255, 255, 255, 0.8), 0 0 40px rgba(100, 180, 255, 0.5);
+      transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      opacity: 1;
+      transform: translateY(0);
+    }
+    #shape-name.fading {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    .hint {
+      font-size: 10px;
+      letter-spacing: 0.25em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.45);
+    }
+    .hidden { display: none !important; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  <div id="ui-overlay">
+    <div class="header">Cosmic Morph &bull; Three.js</div>
+    <div class="bottom-hud">
+      <div id="shape-name">SPIRAL GALAXY</div>
+      <div class="hint">tap to morph &bull; drag to orbit</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+    const isRenderMode = new URLSearchParams(window.location.search).has('render');
+    const isMobile = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    const PARTICLE_COUNT = isMobile ? 38000 : 60000;
+    const SHAPE_NAMES = ['SPIRAL GALAXY', 'DNA HELIX', 'SACRED HEART', 'TORUS KNOT', 'SATURN & RINGS', 'HELLO X'];
+    const CYCLE_DURATION = 3.0;
+    const MORPH_DURATION = 1.1;
+
+    const container = document.getElementById('canvas-container');
+    const uiOverlay = document.getElementById('ui-overlay');
+    const shapeLabel = document.getElementById('shape-name');
+
+    if (isRenderMode) {
+      uiOverlay.classList.add('hidden');
+    }
+
+    // --- Scene, Camera, Renderer ---
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x030308, 0.0018);
+
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+    // Dynamic distance calculation ensuring shapes fill ~85% of viewport width in portrait (9:16)
+    function getOptimalDistance() {
+      const aspect = camera.aspect || (window.innerWidth / window.innerHeight);
+      const vFovRad = THREE.MathUtils.degToRad(camera.fov);
+      const tanV = Math.tan(vFovRad * 0.5);
+
+      // Shapes bounding width is standardized around ~38 units.
+      // In portrait, target fill is ~85% of width.
+      const targetShapeWidth = 38.0;
+      const targetFillFrac = 0.85;
+      const desiredVisibleWidth = targetShapeWidth / targetFillFrac;
+      const distForWidth = desiredVisibleWidth / (2 * tanV * aspect);
+
+      // In landscape, ensure shape height (~40 units) fills ~80% of viewport height without clipping
+      const desiredVisibleHeight = 40.0 / 0.80;
+      const distForHeight = desiredVisibleHeight / (2 * tanV);
+
+      return Math.max(distForWidth, distForHeight);
+    }
+
+    const initDist = getOptimalDistance();
+    camera.position.set(0, 0, initDist);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.rotateSpeed = 0.8;
+    controls.enablePan = false;
+    controls.minDistance = initDist * 0.35;
+    controls.maxDistance = initDist * 2.2;
+    if (isRenderMode) controls.enabled = false;
+
+    let isUserDragging = false;
+    controls.addEventListener('start', () => { isUserDragging = true; });
+    controls.addEventListener('end', () => { isUserDragging = false; });
+
+    // --- Post-Processing (Bloom: Subtle & Crisp) ---
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      0.75,  // subtle strength
+      0.35,  // radius
+      0.18   // threshold
+    );
+    composer.addPass(bloomPass);
+
+    // --- Starfield Background ---
+    {
+      const starGeo = new THREE.BufferGeometry();
+      const starCount = 1600;
+      const starPositions = new Float32Array(starCount * 3);
+      for (let i = 0; i < starCount * 3; i += 3) {
+        const rad = 240 + Math.random() * 320;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        starPositions[i] = rad * Math.sin(phi) * Math.cos(theta);
+        starPositions[i + 1] = rad * Math.sin(phi) * Math.sin(theta);
+        starPositions[i + 2] = rad * Math.cos(phi);
+      }
+      starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+      const starMat = new THREE.PointsMaterial({
+        size: 1.2,
+        color: 0x6888aa,
+        transparent: true,
+        opacity: 0.4,
+        sizeAttenuation: false
+      });
+      scene.add(new THREE.Points(starGeo, starMat));
+    }
+
+    // --- Shape Sampling Generators ---
+
+    // 1. SPIRAL GALAXY: Tilted at ~55 degrees from above so it is viewed in full spiral majesty
+    function sampleGalaxy(n) {
+      const pos = new Float32Array(n * 3);
+      const col = new Float32Array(n * 3);
+      const arms = 3;
+      const armSpread = 0.40;
+      const tiltAngle = 55 * (Math.PI / 180); // 55 deg tilt from horizontal
+      const cosT = Math.cos(tiltAngle);
+      const sinT = Math.sin(tiltAngle);
+
+      for (let i = 0; i < n; i++) {
+        const i3 = i * 3;
+        const rFrac = Math.pow(Math.random(), 1.55);
+        const r = rFrac * 20.0; // outer radius ~20 (diameter 40)
+        const armAngle = (Math.floor(Math.random() * arms) * (Math.PI * 2 / arms));
+        const spiralAngle = r * 0.48 + armAngle;
+        const spread = (1 - rFrac * 0.45) * armSpread * (r + 1.4);
+
+        const gx = Math.cos(spiralAngle) * r + (Math.random() - 0.5) * spread;
+        const gz = Math.sin(spiralAngle) * r + (Math.random() - 0.5) * spread;
+        const gy = (Math.random() - 0.5) * (spread * 0.55) * Math.exp(-r * 0.08);
+
+        // Rotate around X axis so disk is seen at 55 degrees from above
+        pos[i3] = gx;
+        pos[i3 + 1] = gy * cosT + gz * sinT;
+        pos[i3 + 2] = -gy * sinT + gz * cosT;
+
+        // Vivid cosmic palette: radiant amber core to electric cyan and violet arms
+        if (r < 5.0) {
+          const coreT = r / 5.0;
+          col[i3] = 1.0;
+          col[i3 + 1] = THREE.MathUtils.lerp(0.95, 0.65, coreT);
+          col[i3 + 2] = THREE.MathUtils.lerp(0.55, 0.20, coreT);
+        } else {
+          const armT = (r - 5.0) / 15.0;
+          col[i3] = THREE.MathUtils.lerp(0.10, 0.82, armT);
+          col[i3 + 1] = THREE.MathUtils.lerp(0.72, 0.22, armT);
+          col[i3 + 2] = THREE.MathUtils.lerp(1.0, 0.96, armT);
+        }
+      }
+      return { pos, col };
+    }
+
+    // 2. DNA HELIX: Sized to ~38 width to fill ~85% of portrait width
+    function sampleDNA(n) {
+      const pos = new Float32Array(n * 3);
+      const col = new Float32Array(n * 3);
+      const height = 44.0;
+      const radius = 18.0; // diameter 36 + particles spread ~38
+      const turns = 3.8 * Math.PI * 2;
+
+      for (let i = 0; i < n; i++) {
+        const i3 = i * 3;
+        const t = (i / n) - 0.5;
+        const y = t * height;
+        const angle = t * turns;
+        const isRung = Math.random() < 0.26;
+
+        if (!isRung) {
+          const strand = Math.random() < 0.5 ? 0 : Math.PI;
+          const theta = angle + strand + (Math.random() - 0.5) * 0.12;
+          const r = radius + (Math.random() - 0.5) * 1.1;
+          pos[i3] = Math.cos(theta) * r;
+          pos[i3 + 1] = y;
+          pos[i3 + 2] = Math.sin(theta) * r;
+
+          if (strand === 0) {
+            col[i3] = 0.02; col[i3 + 1] = 0.92; col[i3 + 2] = 1.0; // Vivid Cyan
+          } else {
+            col[i3] = 1.0;  col[i3 + 1] = 0.15; col[i3 + 2] = 0.75; // Vivid Magenta
+          }
+        } else {
+          const rungStep = Math.floor(t * 32) / 32;
+          const rungY = rungStep * height;
+          const rungAngle = rungStep * turns;
+          const interp = (Math.random() * 2 - 1) * radius * 0.94;
+          pos[i3] = Math.cos(rungAngle) * interp + (Math.random() - 0.5) * 0.4;
+          pos[i3 + 1] = rungY + (Math.random() - 0.5) * 0.4;
+          pos[i3 + 2] = Math.sin(rungAngle) * interp + (Math.random() - 0.5) * 0.4;
+
+          col[i3] = 0.22; col[i3 + 1] = 1.0; col[i3 + 2] = 0.45; // Vivid Emerald
+        }
+      }
+      return { pos, col };
+    }
+
+    // 3. SACRED HEART: Width ~39
+    function sampleHeart(n) {
+      const pos = new Float32Array(n * 3);
+      const col = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const i3 = i * 3;
+        const t = Math.PI * (2 * Math.random() - 1);
+        const p = Math.PI * (Math.random() - 0.5);
+        const rFrac = Math.pow(Math.random(), 0.35);
+
+        const x0 = 16 * Math.pow(Math.sin(t), 3) * Math.cos(p);
+        const y0 = (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * (0.8 + 0.2 * Math.cos(p));
+        const z0 = 12 * Math.pow(Math.sin(t), 3) * Math.sin(p) * 1.1;
+
+        const scale = 1.22 * rFrac;
+        pos[i3] = x0 * scale;
+        pos[i3 + 1] = y0 * scale + 1.5;
+        pos[i3 + 2] = z0 * scale;
+
+        if (rFrac < 0.28) {
+          col[i3] = 1.0; col[i3 + 1] = 0.88; col[i3 + 2] = 0.35; // Golden Core
+        } else {
+          const pinkT = (rFrac - 0.28) / 0.72;
+          col[i3] = THREE.MathUtils.lerp(1.0, 0.96, pinkT);
+          col[i3 + 1] = THREE.MathUtils.lerp(0.05, 0.20, pinkT);
+          col[i3 + 2] = THREE.MathUtils.lerp(0.18, 0.65, pinkT);
+        }
+      }
+      return { pos, col };
+    }
+
+    // 4. TORUS KNOT: Diameter ~38
+    function sampleTorusKnot(n) {
+      const pos = new Float32Array(n * 3);
+      const col = new Float32Array(n * 3);
+      const p = 2, q = 3;
+      for (let i = 0; i < n; i++) {
+        const i3 = i * 3;
+        const u = (i / n) * Math.PI * 2 * p;
+        const r = (2.0 + Math.cos(q * u / p)) * 5.3;
+        const cx = r * Math.cos(u);
+        const cy = r * Math.sin(u);
+        const cz = -Math.sin(q * u / p) * 9.0;
+
+        const angle = Math.random() * Math.PI * 2;
+        const tubeRad = Math.pow(Math.random(), 0.7) * 3.4;
+        pos[i3] = cx + Math.cos(angle) * tubeRad;
+        pos[i3 + 1] = cy + Math.sin(angle) * tubeRad;
+        pos[i3 + 2] = cz + (Math.random() - 0.5) * tubeRad;
+
+        const hue = (u / (Math.PI * 2 * p)) % 1.0;
+        if (hue < 0.5) {
+          col[i3] = THREE.MathUtils.lerp(0.04, 0.12, hue * 2);
+          col[i3 + 1] = THREE.MathUtils.lerp(1.0, 0.85, hue * 2);
+          col[i3 + 2] = THREE.MathUtils.lerp(0.65, 1.0, hue * 2);
+        } else {
+          col[i3] = THREE.MathUtils.lerp(0.12, 0.98, (hue - 0.5) * 2);
+          col[i3 + 1] = THREE.MathUtils.lerp(0.85, 0.15, (hue - 0.5) * 2);
+          col[i3 + 2] = THREE.MathUtils.lerp(1.0, 0.92, (hue - 0.5) * 2);
+        }
+      }
+      return { pos, col };
+    }
+
+    // 5. SATURN & RINGS: Diameter ~39
+    function sampleSaturn(n) {
+      const pos = new Float32Array(n * 3);
+      const col = new Float32Array(n * 3);
+      const planetPart = Math.floor(n * 0.36);
+      const tilt = 26.5 * (Math.PI / 180);
+      const cosT = Math.cos(tilt), sinT = Math.sin(tilt);
+
+      for (let i = 0; i < n; i++) {
+        const i3 = i * 3;
+        let x, y, z;
+        if (i < planetPart) {
+          const u = Math.random();
+          const v = Math.random();
+          const theta = u * 2.0 * Math.PI;
+          const phi = Math.acos(2.0 * v - 1.0);
+          const r = Math.pow(Math.random(), 0.35) * 7.8;
+          x = r * Math.sin(phi) * Math.cos(theta);
+          y = r * Math.sin(phi) * Math.sin(theta) * 0.9;
+          z = r * Math.cos(phi);
+
+          const band = Math.sin(y * 1.5) * 0.5 + 0.5;
+          col[i3] = THREE.MathUtils.lerp(0.98, 0.85, band);
+          col[i3 + 1] = THREE.MathUtils.lerp(0.75, 0.52, band);
+          col[i3 + 2] = THREE.MathUtils.lerp(0.40, 0.25, band);
+        } else {
+          let rFrac = Math.random();
+          if (rFrac > 0.44 && rFrac < 0.55) {
+            rFrac = Math.random() < 0.5 ? rFrac - 0.12 : rFrac + 0.12;
+          }
+          const ringR = 10.5 + rFrac * 9.2;
+          const theta = Math.random() * Math.PI * 2;
+          x = ringR * Math.cos(theta);
+          y = (Math.random() - 0.5) * 0.35;
+          z = ringR * Math.sin(theta);
+
+          const ringT = (ringR - 10.5) / 9.2;
+          col[i3] = THREE.MathUtils.lerp(0.85, 0.98, ringT);
+          col[i3 + 1] = THREE.MathUtils.lerp(0.78, 0.88, ringT);
+          col[i3 + 2] = THREE.MathUtils.lerp(0.98, 0.65, ringT);
+        }
+
+        const tiltedY = y * cosT - z * sinT;
+        const tiltedZ = y * sinT + z * cosT;
+        pos[i3] = x;
+        pos[i3 + 1] = tiltedY;
+        pos[i3 + 2] = tiltedZ;
+      }
+      return { pos, col };
+    }
+
+    // 6. HELLO X: Stacked on two lines ("HELLO" / "X"), dense particles, fits portrait width
+    function sampleText(n) {
+      const pos = new Float32Array(n * 3);
+      const col = new Float32Array(n * 3);
+      const canvas = document.createElement('canvas');
+      canvas.width = 600;
+      canvas.height = 650;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // Stacked two lines for portrait readability
+      ctx.font = '900 145px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.fillText('HELLO', canvas.width / 2, canvas.height * 0.33);
+      ctx.font = '900 205px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.fillText('X', canvas.width / 2, canvas.height * 0.70);
+
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const validPixels = [];
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+
+      for (let y = 0; y < canvas.height; y += 2) {
+        for (let x = 0; x < canvas.width; x += 2) {
+          const idx = (y * canvas.width + x) * 4;
+          if (imgData[idx] > 100) {
+            validPixels.push({ x, y });
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+
+      const textW = maxX - minX;
+      const midX = (minX + maxX) * 0.5;
+      const midY = (minY + maxY) * 0.5;
+      // Scale to ~37 units width
+      const scale = 37.0 / textW;
+      const numPixels = validPixels.length;
+
+      for (let i = 0; i < n; i++) {
+        const i3 = i * 3;
+        const p = validPixels[Math.floor(Math.random() * numPixels)];
+        // Dense distribution with subtle sub-pixel jitter
+        pos[i3] = (p.x - midX) * scale + (Math.random() - 0.5) * 0.32;
+        pos[i3 + 1] = -(p.y - midY) * scale + (Math.random() - 0.5) * 0.32;
+        pos[i3 + 2] = (Math.random() - 0.5) * 1.2;
+
+        // Vivid neon gradient: electric cyan -> deep magenta -> solar gold
+        const normX = (pos[i3] + 18.5) / 37.0;
+        const normY = (pos[i3 + 1] + 18.5) / 37.0;
+        const grad = THREE.MathUtils.clamp(normX * 0.5 + normY * 0.5, 0.0, 1.0);
+
+        if (grad < 0.5) {
+          const u = grad * 2.0;
+          col[i3] = THREE.MathUtils.lerp(0.04, 0.95, u);
+          col[i3 + 1] = THREE.MathUtils.lerp(0.92, 0.18, u);
+          col[i3 + 2] = THREE.MathUtils.lerp(1.0, 0.88, u);
+        } else {
+          const u = (grad - 0.5) * 2.0;
+          col[i3] = THREE.MathUtils.lerp(0.95, 1.0, u);
+          col[i3 + 1] = THREE.MathUtils.lerp(0.18, 0.82, u);
+          col[i3 + 2] = THREE.MathUtils.lerp(0.88, 0.25, u);
+        }
+      }
+      return { pos, col };
+    }
+
+    // --- Build Particle Geometry ---
+    const geometry = new THREE.BufferGeometry();
+    const shapes = [
+      sampleGalaxy(PARTICLE_COUNT),
+      sampleDNA(PARTICLE_COUNT),
+      sampleHeart(PARTICLE_COUNT),
+      sampleTorusKnot(PARTICLE_COUNT),
+      sampleSaturn(PARTICLE_COUNT),
+      sampleText(PARTICLE_COUNT)
+    ];
+
+    shapes.forEach((s, idx) => {
+      geometry.setAttribute(`aPos${idx}`, new THREE.BufferAttribute(s.pos, 3));
+      geometry.setAttribute(`aCol${idx}`, new THREE.BufferAttribute(s.col, 3));
+    });
+    geometry.setAttribute('position', new THREE.BufferAttribute(shapes[0].pos, 3));
+
+    const seeds = new Float32Array(PARTICLE_COUNT * 3);
+    for (let i = 0; i < PARTICLE_COUNT * 3; i += 3) {
+      seeds[i] = Math.random();
+      seeds[i + 1] = Math.random();
+      seeds[i + 2] = Math.random();
+    }
+    geometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 3));
+
+    // --- Shader Material ---
+    const particleMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uProgress: { value: 0 },
+        uShapeA: { value: 0 },
+        uShapeB: { value: 1 },
+        uPointer: { value: new THREE.Vector3(9999, 9999, 9999) },
+        uPointerActive: { value: 0.0 },
+        uShockwaveOrigin: { value: new THREE.Vector3(0, 0, 0) },
+        uShockwaveTime: { value: -999.0 },
+        uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) }
+      },
+      vertexShader: `
+        uniform float uTime;
+        uniform float uProgress;
+        uniform int uShapeA;
+        uniform int uShapeB;
+        uniform vec3 uPointer;
+        uniform float uPointerActive;
+        uniform vec3 uShockwaveOrigin;
+        uniform float uShockwaveTime;
+        uniform float uPixelRatio;
+
+        attribute vec3 aPos0, aPos1, aPos2, aPos3, aPos4, aPos5;
+        attribute vec3 aCol0, aCol1, aCol2, aCol3, aCol4, aCol5;
+        attribute vec3 aSeed;
+
+        varying vec3 vColor;
+        varying float vAlpha;
+
+        vec3 getShapePos(int idx) {
+          if (idx == 0) return aPos0;
+          if (idx == 1) return aPos1;
+          if (idx == 2) return aPos2;
+          if (idx == 3) return aPos3;
+          if (idx == 4) return aPos4;
+          return aPos5;
+        }
+
+        vec3 getShapeCol(int idx) {
+          if (idx == 0) return aCol0;
+          if (idx == 1) return aCol1;
+          if (idx == 2) return aCol2;
+          if (idx == 3) return aCol3;
+          if (idx == 4) return aCol4;
+          return aCol5;
+        }
+
+        vec3 hash33(vec3 p) {
+          p = fract(p * vec3(443.897, 441.423, 437.195));
+          p += dot(p, p.yxz + 19.19);
+          return -1.0 + 2.0 * fract((p.xxy + p.yxx) * p.zyx);
+        }
+
+        vec3 simpleCurl(vec3 p, float t) {
+          vec3 p1 = p * 0.09 + vec3(0.0, t * 0.4, 0.0);
+          vec3 s1 = sin(p1.yzx * 3.14159);
+          vec3 c1 = cos(p1.zxy * 3.14159);
+          return normalize(cross(s1, c1) + hash33(p1) * 0.4);
+        }
+
+        void main() {
+          vec3 pA = getShapePos(uShapeA);
+          vec3 pB = getShapePos(uShapeB);
+          vec3 cA = getShapeCol(uShapeA);
+          vec3 cB = getShapeCol(uShapeB);
+
+          float staggered = clamp((uProgress - aSeed.x * 0.28) / 0.72, 0.0, 1.0);
+          float ease = smoothstep(0.0, 1.0, staggered);
+          float burst = sin(ease * 3.14159265);
+
+          vec3 pos = mix(pA, pB, ease);
+          vec3 curl = simpleCurl(pos, uTime);
+          vec3 radial = normalize(pos + vec3(0.0001)) * (aSeed.y * 22.0 + 5.0);
+          pos += (curl * 14.0 + radial) * burst;
+
+          if (uPointerActive > 0.5) {
+            vec3 toPointer = pos - uPointer;
+            float dist = length(toPointer);
+            if (dist < 18.0 && dist > 0.001) {
+              float repelForce = (1.0 - dist / 18.0);
+              pos += normalize(toPointer) * (repelForce * repelForce * 9.0);
+            }
+          }
+
+          if (uShockwaveTime >= 0.0 && uShockwaveTime < 2.2) {
+            float swRadius = uShockwaveTime * 38.0;
+            vec3 toOrigin = pos - uShockwaveOrigin;
+            float distOrigin = length(toOrigin);
+            float ring = exp(-pow((distOrigin - swRadius) * 0.45, 2.0));
+            pos += normalize(toOrigin + vec3(0.0001)) * ring * 8.5;
+          }
+
+          vec3 col = clamp(mix(cA, cB, ease), 0.0, 1.0);
+          col = clamp(col + vec3(0.18, 0.22, 0.26) * pow(burst, 2.0), 0.0, 1.0);
+          vColor = col;
+          vAlpha = clamp(mix(0.40, 0.68, aSeed.y) * (1.0 - burst * 0.2), 0.35, 0.70);
+
+          vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+          gl_Position = projectionMatrix * mvPosition;
+
+          float pointDist = max(-mvPosition.z, 1.0);
+          float baseSize = mix(1.7, 3.0, aSeed.z) * uPixelRatio;
+          float pSize = baseSize * (115.0 / pointDist);
+          gl_PointSize = clamp(pSize, 1.0, 4.8 * uPixelRatio);
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        varying float vAlpha;
+
+        void main() {
+          vec2 coord = gl_PointCoord - vec2(0.5);
+          float r = length(coord);
+          if (r > 0.5) discard;
+
+          float softEdge = smoothstep(0.5, 0.06, r);
+          float glowCore = exp(-r * 5.2);
+          vec3 finalColor = clamp(mix(vColor, vec3(1.0), glowCore * 0.32), 0.0, 1.0);
+
+          gl_FragColor = vec4(finalColor, softEdge * vAlpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending
+    });
+
+    const particles = new THREE.Points(geometry, particleMaterial);
+    scene.add(particles);
+
+    // --- Interaction & Event Handling ---
+    let manualTimeJump = 0;
+    let shockwaveStartTime = -999;
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2(-9999, -9999);
+    const intersectPoint = new THREE.Vector3();
+
+    function updatePointer3D(event) {
+      if (isRenderMode) return;
+      const x = event.touches ? event.touches[0].clientX : event.clientX;
+      const y = event.touches ? event.touches[0].clientY : event.clientY;
+      pointer.x = (x / window.innerWidth) * 2 - 1;
+      pointer.y = -(y / window.innerHeight) * 2 + 1;
+
+      raycaster.setFromCamera(pointer, camera);
+      const normal = camera.getWorldDirection(new THREE.Vector3()).negate();
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, new THREE.Vector3(0, 0, 0));
+      if (raycaster.ray.intersectPlane(plane, intersectPoint)) {
+        particleMaterial.uniforms.uPointer.value.copy(intersectPoint);
+        particleMaterial.uniforms.uPointerActive.value = 1.0;
+      }
+    }
+
+    function triggerNextMorph(clientPos) {
+      if (isRenderMode) return;
+      const now = performance.now() * 0.001;
+      shockwaveStartTime = now;
+      if (clientPos) {
+        pointer.x = (clientPos.x / window.innerWidth) * 2 - 1;
+        pointer.y = -(clientPos.y / window.innerHeight) * 2 + 1;
+        raycaster.setFromCamera(pointer, camera);
+        const normal = camera.getWorldDirection(new THREE.Vector3()).negate();
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, new THREE.Vector3(0, 0, 0));
+        if (raycaster.ray.intersectPlane(plane, intersectPoint)) {
+          particleMaterial.uniforms.uShockwaveOrigin.value.copy(intersectPoint);
+        } else {
+          particleMaterial.uniforms.uShockwaveOrigin.value.set(0, 0, 0);
+        }
+      } else {
+        particleMaterial.uniforms.uShockwaveOrigin.value.set(0, 0, 0);
+      }
+
+      const effectiveTime = now + manualTimeJump;
+      const curCycleIdx = Math.floor(effectiveTime / CYCLE_DURATION);
+      const targetTime = (curCycleIdx + 1) * CYCLE_DURATION - (CYCLE_DURATION - MORPH_DURATION);
+      manualTimeJump += (targetTime - effectiveTime);
+    }
+
+    window.addEventListener('pointermove', updatePointer3D);
+    window.addEventListener('pointerleave', () => {
+      particleMaterial.uniforms.uPointerActive.value = 0.0;
+    });
+
+    let downTime = 0;
+    let downPos = { x: 0, y: 0 };
+    window.addEventListener('pointerdown', (e) => {
+      downTime = performance.now();
+      downPos = { x: e.clientX, y: e.clientY };
+    });
+    window.addEventListener('pointerup', (e) => {
+      const elapsed = performance.now() - downTime;
+      const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y);
+      if (elapsed < 320 && dist < 12) {
+        triggerNextMorph({ x: e.clientX, y: e.clientY });
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
+      bloomPass.setSize(window.innerWidth, window.innerHeight);
+      particleMaterial.uniforms.uPixelRatio.value = Math.min(window.devicePixelRatio, 2);
+      const newDist = getOptimalDistance();
+      controls.minDistance = newDist * 0.35;
+      controls.maxDistance = newDist * 2.2;
+    });
+
+    // Compute camera orbit position with smooth easing to front head-on when "HELLO X" is active
+    function computeCameraPos(t, dist) {
+      const cycleIdx = Math.floor(t / CYCLE_DURATION);
+      const shapeA = cycleIdx % SHAPES_COUNT;
+      const localTime = t % CYCLE_DURATION;
+      const holdTime = CYCLE_DURATION - MORPH_DURATION;
+      const progress = localTime > holdTime ? (localTime - holdTime) / MORPH_DURATION : 0;
+
+      // Text shape is index 5 ("HELLO X")
+      let textWeight = 0;
+      if (shapeA === 4) {
+        textWeight = progress; // Morphing into HELLO X
+      } else if (shapeA === 5) {
+        textWeight = 1.0 - progress; // Holding HELLO X, then morphing out
+      }
+      const textInf = THREE.MathUtils.smoothstep(textWeight, 0.0, 1.0);
+
+      // Base gentle 3D orbit
+      const baseAngle = t * 0.16;
+      // Head-on target angle is the nearest full revolution (front facing +Z)
+      const nearestFront = Math.round(baseAngle / (Math.PI * 2)) * (Math.PI * 2);
+      const orbitAngle = THREE.MathUtils.lerp(baseAngle, nearestFront, textInf);
+
+      // Slight elevation for other shapes, easing to exactly 0 (head-on) for text
+      const baseElev = 0.18 + Math.sin(t * 0.22) * 0.07;
+      const elev = THREE.MathUtils.lerp(baseElev, 0.0, textInf);
+
+      const x = Math.sin(orbitAngle) * Math.cos(elev) * dist;
+      const y = Math.sin(elev) * dist;
+      const z = Math.cos(orbitAngle) * Math.cos(elev) * dist;
+      return new THREE.Vector3(x, y, z);
+    }
+
+    // --- Core Pure Function of Time (seek) ---
+    let displayedShapeIdx = -1;
+    const SHAPES_COUNT = SHAPE_NAMES.length;
+
+    window.seek = function(t) {
+      const cycleIdx = Math.floor(t / CYCLE_DURATION);
+      const shapeA = cycleIdx % SHAPES_COUNT;
+      const shapeB = (cycleIdx + 1) % SHAPES_COUNT;
+      const localTime = t % CYCLE_DURATION;
+      const holdTime = CYCLE_DURATION - MORPH_DURATION;
+
+      let progress = 0;
+      if (localTime > holdTime) {
+        progress = (localTime - holdTime) / MORPH_DURATION;
+      }
+
+      particleMaterial.uniforms.uTime.value = t;
+      particleMaterial.uniforms.uProgress.value = progress;
+      particleMaterial.uniforms.uShapeA.value = shapeA;
+      particleMaterial.uniforms.uShapeB.value = shapeB;
+
+      const dist = getOptimalDistance();
+
+      if (isRenderMode) {
+        const targetCam = computeCameraPos(t, dist);
+        camera.position.copy(targetCam);
+        camera.lookAt(0, 0, 0);
+      }
+
+      if (!isRenderMode) {
+        const activeIdx = progress > 0.5 ? shapeB : shapeA;
+        if (activeIdx !== displayedShapeIdx) {
+          displayedShapeIdx = activeIdx;
+          shapeLabel.classList.add('fading');
+          setTimeout(() => {
+            shapeLabel.textContent = SHAPE_NAMES[displayedShapeIdx];
+            shapeLabel.classList.remove('fading');
+          }, 220);
+        }
+      }
+
+      composer.render();
+    };
+
+    // --- Animation Loop / Render-Mode Hook ---
+    if (isRenderMode) {
+      window.renderReady = true;
+    } else {
+      const clock = new THREE.Clock();
+
+      function animate() {
+        requestAnimationFrame(animate);
+
+        const realTime = clock.getElapsedTime();
+        const effectiveTime = realTime + manualTimeJump;
+
+        if (shockwaveStartTime > 0) {
+          const swTime = realTime - shockwaveStartTime;
+          particleMaterial.uniforms.uShockwaveTime.value = swTime;
+        }
+
+        // When user is not dragging, smoothly follow the calculated camera orbit / head-on ease
+        if (!isUserDragging) {
+          const dist = getOptimalDistance();
+          const targetCam = computeCameraPos(effectiveTime, dist);
+          camera.position.lerp(targetCam, 0.055);
+          controls.target.set(0, 0, 0);
+        }
+
+        controls.update();
+        window.seek(effectiveTime);
+      }
+      animate();
+    }
+  </script>
+</body>
+</html>

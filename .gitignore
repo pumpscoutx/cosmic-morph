@@ -1,6 +1,8 @@
 node_modules
 video.mp4
-render.log
+ref/
 *.txt
 *.py
 *.js
+*.json
+*.log
